@@ -11,15 +11,17 @@
 #include <unistd.h>
 #include <time.h>
 #include <sys/time.h>
+#include <syslog.h>
 
 #include <ruxc.h>
 
 static char *version = "httpcli 0.1.0";
 static char* helpmsg = "\
-Usage: httpcli [-D] [-p] [-t timeout] [-n count]\n\
+Usage: httpcli [params]\n\
 Options:\n\
     -a count      number of retry attempts\n\
-    -d            switch on debug mode\n\
+    -d level      debug level (0 - no logs; 1 - errors; 2 - debug)\n\
+    -l type       log type (0 - print to stdout; 1 - print to syslog)\n\
     -n count      number of requests to be sent\n\
     -p            do http post instead of get\n\
     -P data       http post data\n\
@@ -50,6 +52,7 @@ int main(int argc, char *argv[])
 	char hdrbuf[256];
 	struct timeval tvb = {0}, tve = {0};
 	unsigned int diff = 0;
+	int logtype = 0;
 	int debug = 0;
 	int timeout = 5000;
 	char *postdata = "{ \"info\": \"testing\", \"id\": 80 }";
@@ -57,7 +60,7 @@ int main(int argc, char *argv[])
 	char *url = NULL;
 
 	opterr=0;
-	while ((c=getopt(argc,argv, "a:n:P:r:t:u:dhp"))!=-1){
+	while ((c=getopt(argc,argv, "a:d:l:n:P:r:t:u:hp"))!=-1){
 		switch(c){
 			case 'a':
 				retry = atoi(optarg);
@@ -67,8 +70,13 @@ int main(int argc, char *argv[])
 				reuse = atoi(optarg);
 				if(reuse<0 || reuse>2) { reuse = 0; }
 				break;
+			case 'l':
+				logtype = atoi(optarg);
+				if(logtype<0 || logtype>1) { logtype = 0; }
+				break;
 			case 'd':
-				debug = 1;
+				debug = atoi(optarg);
+				if(debug<0 || debug>2) { debug = 0; }
 				break;
 			case 'p':
 				post = 1;
@@ -94,10 +102,14 @@ int main(int argc, char *argv[])
 		}
 	}
 
+	if(debug==2) {
+		openlog(argv[0], LOG_PID, LOG_DAEMON);
+	}
 	v_http_request.timeout = timeout;
 	v_http_request.timeout_connect = timeout;
 	v_http_request.timeout_read = timeout;
 	v_http_request.timeout_write = timeout;
+	v_http_request.logtype = logtype;
 	v_http_request.debug = debug;
 	v_http_request.reuse = reuse;
 	v_http_request.retry = retry;
@@ -153,6 +165,8 @@ int main(int argc, char *argv[])
 		v_http_response.rescode = 0;
 	}
 	printf("\n");
-
+	if(debug==2) {
+		closelog();
+	}
 	return 0;
 }

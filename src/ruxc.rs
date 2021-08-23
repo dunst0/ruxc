@@ -46,6 +46,7 @@ pub struct RuxcHTTPRequest {
     pub debug: libc::c_int,
     pub reuse: libc::c_int,
     pub retry: libc::c_int,
+    pub logtype: libc::c_int,
 }
 
 #[repr(C)]
@@ -146,6 +147,36 @@ impl rustls::ServerCertVerifier for AcceptAll {
     }
 }
 
+// logtype: 0 - stdout; 1 - syslog
+// debug: threshold to filter based on level value
+// level: 0 - no logs; 1 - errors; 2 - infos; 3 - debugs
+fn ruxc_print_log(logtype: i32, debug: i32, level: i32, message: String) {
+    if level > debug {
+        return;
+    }
+    if logtype == 0 {
+        if level == 1 {
+            println!("* ruxc [error]:: {}", message);
+        } else if level == 2 {
+            println!("* ruxc [info]:: {}", message);
+        } else if level == 3 {
+            println!("* ruxc [debug]:: {}", message);
+        }
+    } else if logtype == 1 {
+        let c_message = std::ffi::CString::new(message).unwrap();
+        let c_fmt = std::ffi::CStr::from_bytes_with_nul(b"%s\n\0").expect("format field failed");
+        unsafe {
+            if level == 1 {
+                libc::syslog(libc::LOG_ERR, c_fmt.as_ptr(), c_message.as_ptr());
+            } else if level == 2 {
+                libc::syslog(libc::LOG_INFO, c_fmt.as_ptr(), c_message.as_ptr());
+            } else if level == 3 {
+                libc::syslog(libc::LOG_DEBUG, c_fmt.as_ptr(), c_message.as_ptr());
+            }
+        }
+    }
+}
+
 fn ruxc_http_agent_builder(v_http_request: *const RuxcHTTPRequest)
         -> ureq::AgentBuilder
 {
@@ -176,6 +207,7 @@ fn ruxc_http_request_perform(
         -> Result<(), Error>
 {
     let debug = unsafe { (*v_http_request).debug as i32 };
+    let logtype = unsafe { (*v_http_request).logtype as i32 };
 
     let c_url_str = unsafe {
         std::ffi::CStr::from_ptr((*v_http_request).url)
@@ -187,19 +219,19 @@ fn ruxc_http_request_perform(
     match *v_method {
         HTTPMethodType::MethodPOST => {
             if debug != 0 {
-                println!("* ruxc:: doing HTTP POST - url: {}", r_url_str);
+                ruxc_print_log(logtype, debug, 2, format!("doing HTTP POST - url: {}", r_url_str));
             }
             req = agent.post(r_url_str);
         },
         HTTPMethodType::MethodDELETE => {
             if debug != 0 {
-                println!("* ruxc:: doing HTTP DELETE - url: {}", r_url_str);
+                ruxc_print_log(logtype, debug, 2, format!("doing HTTP DELETE - url: {}", r_url_str));
             }
             req = agent.delete(r_url_str);
         },
         _ => {
             if debug != 0 {
-                println!("* ruxc:: doing HTTP GET - url: {}", r_url_str);
+            ruxc_print_log(logtype, debug, 2, format!("doing HTTP GET - url: {}", r_url_str));
             }
             req = agent.get(r_url_str);
         },
@@ -209,7 +241,7 @@ fn ruxc_http_request_perform(
         if !(*v_http_request).headers.is_null() && (*v_http_request).headers_len > 0 {
             let r_headers_str = std::ffi::CStr::from_ptr((*v_http_request).headers).to_str().unwrap();
             if debug != 0 {
-                println!("* ruxc:: adding headers: [[{}]]", r_headers_str);
+                ruxc_print_log(logtype, debug, 3, format!("adding headers: [[{}]]", r_headers_str));
             }
             for line in r_headers_str.lines() {
                 let cpos = line.chars().position(|c| c == ':').unwrap();
@@ -231,12 +263,12 @@ fn ruxc_http_request_perform(
             }
         }
         if debug != 0 {
-            println!("* ruxc:: post body: [[{}]]", r_body_str);
+            ruxc_print_log(logtype, debug, 3, format!("post body: [[{}]]", r_body_str));
         }
         exres = req.send_string(r_body_str);
     } else {
         if debug != 0 {
-            println!("* ruxc:: get request");
+            ruxc_print_log(logtype, debug, 3, format!("get request"));
         }
         exres = req.call();
     }
@@ -249,19 +281,19 @@ fn ruxc_http_request_perform(
         }
         Err(err) => {
             if debug != 0 {
-                println!("* ruxc:: error: {:?}", err);
+                ruxc_print_log(logtype, debug, 1, format!("* ruxc:: error: {:?}", err));
             }
             return Ok(());
         }
     }
 
     if debug != 0 {
-        println!(
+        ruxc_print_log(logtype, debug, 3, format!(
             "* ruxc:: {} {} {}",
             res.http_version(),
             res.status(),
             res.status_text()
-        );
+        ));
     }
 
     unsafe {
@@ -275,7 +307,7 @@ fn ruxc_http_request_perform(
         let body: String = res.into_string()?;
 
         if debug != 0 {
-            println!("* ruxc:: HTTP response body: {}", body);
+            ruxc_print_log(logtype, debug, 3, format!("* ruxc:: HTTP response body: {}", body));
         }
 
         unsafe {
@@ -307,9 +339,10 @@ fn ruxc_http_request_perform_once(
     };
 
     let debug = unsafe { (*v_http_request).debug as i32 };
+    let logtype = unsafe { (*v_http_request).logtype as i32 };
 
     if debug != 0 {
-        println!("* ruxc:: initializing http agent - noreuse");
+        ruxc_print_log(logtype, debug, 3, format!("initializing http agent - noreuse"));
     }
 
     let builder = ruxc_http_agent_builder(v_http_request);
@@ -349,12 +382,13 @@ fn ruxc_http_request_perform_reuse(
     };
 
     let debug = unsafe { (*v_http_request).debug as i32 };
+    let logtype = unsafe { (*v_http_request).logtype as i32 };
 
     let haready = unsafe { HTTPAGENTREADY as u32 };
 
     if haready == 0 {
         if debug != 0 {
-            println!("* ruxc:: initializing http agent - reuse on");
+            ruxc_print_log(logtype, debug, 3, format!("initializing http agent - reuse on"));
         }
 
         let builder = ruxc_http_agent_builder(v_http_request);
@@ -363,7 +397,7 @@ fn ruxc_http_request_perform_reuse(
             *agent.borrow_mut() = builder.build();
         });
         if debug != 0 {
-            println!("* ruxc:: saving ready state - reuse on");
+            ruxc_print_log(logtype, debug, 3, format!("saving ready state - reuse on"));
         }
         unsafe {
             HTTPAGENTREADY = 1;
@@ -406,6 +440,7 @@ fn ruxc_http_request_perform_hashmap(
     };
 
     let debug = unsafe { (*v_http_request).debug as i32 };
+    let logtype = unsafe { (*v_http_request).logtype as i32 };
 
     let r_url_str = unsafe {
         std::ffi::CStr::from_ptr((*v_http_request).url).to_string_lossy().into_owned()
@@ -418,7 +453,7 @@ fn ruxc_http_request_perform_hashmap(
                     url.port_or_known_default().unwrap_or(80));
 
     if debug != 0 {
-        println!("* ruxc:: htable key [{}]", htkey);
+        ruxc_print_log(logtype, debug, 3, format!("htable key [{}]", htkey));
     }
 
     HTTPAGENTMAP.with(|item| {
@@ -426,14 +461,14 @@ fn ruxc_http_request_perform_hashmap(
         if ! ht.contains_key(&htkey) {
             let htnewkey = String::clone(&htkey);
             if debug != 0 {
-                println!("* ruxc:: initializing http agent for [{}]", htnewkey);
+                ruxc_print_log(logtype, debug, 3, format!("initializing http agent for [{}]", htnewkey));
             }
             let builder = ruxc_http_agent_builder(v_http_request);
             ht.insert(htnewkey, builder.build());
         }
         if let Some(agent) = ht.get(&htkey) {
             if debug != 0 {
-                println!("* ruxc:: agent retrieved for [{}]", htkey);
+                ruxc_print_log(logtype, debug, 3, format!("agent retrieved for [{}]", htkey));
             }
             let mut retry = unsafe { (*v_http_request).retry as i32 };
             loop {
